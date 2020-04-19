@@ -104,10 +104,15 @@ public class RetryPolicy
             return new ExceptionClassification(Optional.of(TRUE), DOWN);
         }
 
-        if (idempotent && throwable instanceof RequestTimeoutException) {
+        if (throwable instanceof RequestTimeoutException) {
             // We don't know if the server is overloaded, or if this specific
             // request just takes to long, so just mark the server as normal.
-            return new ExceptionClassification(Optional.of(TRUE), NORMAL);
+            if (idempotent) {
+                return new ExceptionClassification(Optional.of(TRUE), NORMAL);
+            }
+            else {
+                return new ExceptionClassification(Optional.of(FALSE), NORMAL);
+            }
         }
 
         if (throwable instanceof MessageTooLargeException) {

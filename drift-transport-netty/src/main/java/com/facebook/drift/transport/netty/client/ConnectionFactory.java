@@ -17,6 +17,7 @@ package com.facebook.drift.transport.netty.client;
 
 import com.facebook.drift.protocol.TTransportException;
 import com.facebook.drift.transport.netty.ssl.SslContextFactory;
+import com.facebook.drift.transport.netty.throttle.ThrottleLock;
 import com.google.common.net.HostAndPort;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBufAllocator;
@@ -24,7 +25,11 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.WriteBufferWaterMark;
+import io.netty.channel.epoll.Epoll;
+import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
 
@@ -33,11 +38,16 @@ import java.net.InetSocketAddress;
 import static com.google.common.primitives.Ints.saturatedCast;
 import static io.netty.channel.ChannelOption.ALLOCATOR;
 import static io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS;
+import static io.netty.channel.ChannelOption.SO_KEEPALIVE;
+import static io.netty.channel.ChannelOption.SO_RCVBUF;
+import static io.netty.channel.ChannelOption.SO_SNDBUF;
+import static io.netty.channel.ChannelOption.WRITE_BUFFER_WATER_MARK;
 import static java.util.Objects.requireNonNull;
 
 class ConnectionFactory
         implements ConnectionManager
 {
+    public static final AttributeKey<ThrottleLock> THROTTLE_LOCK_KEY = AttributeKey.valueOf("throttle.lock.key");
     private final EventLoopGroup group;
     private final SslContextFactory sslContextFactory;
     private final ByteBufAllocator allocator;
@@ -52,12 +62,21 @@ class ConnectionFactory
     @Override
     public Future<Channel> getConnection(ConnectionParameters connectionParameters, HostAndPort address)
     {
+        Class klazz = NioSocketChannel.class;
+        if (Epoll.isAvailable()) {
+            klazz = EpollSocketChannel.class;
+        }
+
         try {
             Bootstrap bootstrap = new Bootstrap()
                     .group(group)
-                    .channel(NioSocketChannel.class)
+                    .channel(klazz)
                     .option(ALLOCATOR, allocator)
+                    .option(SO_KEEPALIVE, true)
                     .option(CONNECT_TIMEOUT_MILLIS, saturatedCast(connectionParameters.getConnectTimeout().toMillis()))
+                    .option(WRITE_BUFFER_WATER_MARK, new WriteBufferWaterMark(64 * 1024, 1024 * 1024))
+                    .option(SO_SNDBUF, 1024 * 1024)
+                    .option(SO_RCVBUF, 32 * 1024)
                     .handler(new ThriftClientInitializer(
                             connectionParameters.getTransport(),
                             connectionParameters.getProtocol(),
@@ -69,7 +88,7 @@ class ConnectionFactory
             Promise<Channel> promise = group.next().newPromise();
             promise.setUncancellable();
             bootstrap.connect(new InetSocketAddress(address.getHost(), address.getPort()))
-                    .addListener((ChannelFutureListener) future -> notifyConnect(future, promise));
+                    .addListener((ChannelFutureListener) channelFuture -> notifyConnect(channelFuture, promise));
             return promise;
         }
         catch (Throwable e) {
@@ -77,22 +96,28 @@ class ConnectionFactory
         }
     }
 
-    private static void notifyConnect(ChannelFuture future, Promise<Channel> promise)
+    private static void notifyConnect(ChannelFuture channelFuture, Promise<Channel> promise)
     {
-        if (future.isSuccess()) {
-            Channel channel = future.channel();
+        if (channelFuture.isSuccess()) {
+            Channel channel = channelFuture.channel();
             if (!promise.trySuccess(channel)) {
                 // Promise was completed in the meantime (likely cancelled), just release the channel again
                 channel.close();
             }
         }
         else {
-            promise.tryFailure(future.cause());
+            promise.tryFailure(channelFuture.cause());
         }
     }
 
     @Override
     public void returnConnection(Channel connection)
+    {
+        connection.close();
+    }
+
+    @Override
+    public void closeConnection(Channel connection)
     {
         connection.close();
     }

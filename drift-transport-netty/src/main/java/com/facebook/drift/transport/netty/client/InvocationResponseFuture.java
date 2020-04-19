@@ -15,12 +15,14 @@
  */
 package com.facebook.drift.transport.netty.client;
 
+import com.facebook.airlift.log.Logger;
 import com.facebook.drift.TException;
 import com.facebook.drift.protocol.TTransportException;
 import com.facebook.drift.transport.client.ConnectionFailedException;
 import com.facebook.drift.transport.client.InvokeRequest;
 import com.facebook.drift.transport.netty.client.ConnectionManager.ConnectionParameters;
 import com.facebook.drift.transport.netty.client.ThriftClientHandler.ThriftRequest;
+import com.facebook.drift.transport.netty.throttle.ThrottleLock;
 import com.google.common.util.concurrent.AbstractFuture;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
@@ -31,13 +33,16 @@ import io.netty.util.concurrent.Future;
 import javax.annotation.concurrent.GuardedBy;
 
 import java.io.IOException;
+import java.util.concurrent.TimeUnit;
 
+import static com.facebook.drift.transport.netty.client.ConnectionFactory.THROTTLE_LOCK_KEY;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static java.util.Objects.requireNonNull;
 
 class InvocationResponseFuture
         extends AbstractFuture<Object>
 {
+    private static final Logger log = Logger.get(InvocationResponseFuture.class);
     private final InvokeRequest request;
     private final ConnectionParameters connectionParameters;
     private final ConnectionManager connectionManager;
@@ -46,7 +51,7 @@ class InvocationResponseFuture
     private Future<Channel> connectionFuture;
 
     @GuardedBy("this")
-    private ThriftRequest invocationFuture;
+    private ThriftRequest thriftRequest;
 
     static InvocationResponseFuture createInvocationResponseFuture(InvokeRequest request, ConnectionParameters connectionParameters, ConnectionManager connectionManager)
     {
@@ -78,7 +83,20 @@ class InvocationResponseFuture
                 try {
                     if (channelFuture.isSuccess()) {
                         // Netty future listener generic type declaration requires a cast when used with a lambda
-                        tryInvocation((Channel) channelFuture.getNow());
+                        //TODO : AGP
+                        Channel channel = (Channel) channelFuture.getNow();
+                        ThrottleLock throttleLock = channel.attr(THROTTLE_LOCK_KEY).get();
+                        synchronized (throttleLock) {
+                            while (!channel.isWritable()) {
+                                log.info("Waiting since channel " + channel.id().asShortText() + " is not writeable");
+                                throttleLock.wait(TimeUnit.MILLISECONDS.toMillis(100));
+                            }
+                            log.info("Channel connected " + channel.id().asShortText()
+                                    + " highWatermark " + channel.config().getWriteBufferHighWaterMark()
+                                    + " bytesBeforeUnwritable : " + channel.bytesBeforeUnwritable()
+                                    + "\n requestID Params : " + request.getParameters());
+                            tryInvocation(channel);
+                        }
                     }
                     else {
                         fatalError(new ConnectionFailedException(request.getAddress(), channelFuture.cause()));
@@ -103,18 +121,26 @@ class InvocationResponseFuture
         }
 
         try {
-            invocationFuture = new ThriftRequest(request.getMethod(), request.getParameters(), request.getHeaders());
-            Futures.addCallback(invocationFuture, new FutureCallback<Object>()
+            thriftRequest = new ThriftRequest(request.getMethod(), request.getParameters(), request.getHeaders());
+            Futures.addCallback(thriftRequest, new FutureCallback<Object>()
                     {
                         @Override
                         public void onSuccess(Object result)
                         {
                             try {
+                                //TODO : AGP
+                                String message = "Received response from Thrift Server " + thriftRequest.getParameters();
+                                log.info(message);
                                 connectionManager.returnConnection(channel);
+                                log.info("Channel returned after success " + channel.id().asShortText());
                                 set(result);
                             }
                             catch (Throwable t) {
+                                //TODO : AGP
+                                log.error(t, "Error response from onSuccess " + thriftRequest.getMethod());
                                 fatalError(t);
+                                connectionManager.returnConnection(channel);
+                                log.info("Channel returned after failure " + channel.id().asShortText());
                             }
                         }
 
@@ -122,7 +148,11 @@ class InvocationResponseFuture
                         public void onFailure(Throwable t)
                         {
                             try {
+                                //TODO : AGP
+                                String message = "Received response onFailure " + " requestID : " + thriftRequest.getParameters();
+                                log.error(t, message);
                                 connectionManager.returnConnection(channel);
+                                log.info("Channel returned after failure " + channel.id().asShortText() + " requestID : " + thriftRequest.getParameters());
                             }
                             finally {
                                 fatalError(t);
@@ -131,14 +161,25 @@ class InvocationResponseFuture
                     },
                     directExecutor());
 
-            ChannelFuture sendFuture = channel.writeAndFlush(invocationFuture);
+            log.info("tryInvocation : Writing and Flushing " + thriftRequest.getMethod() + " on channel " + channel.id().asShortText());
+            ChannelFuture sendFuture = channel.writeAndFlush(thriftRequest);
             sendFuture.addListener(channelFuture -> {
                 try {
                     if (!channelFuture.isSuccess()) {
+                        //TODO : AGP
+                        log.error("Error response channelFuture not success");
+                        log.info("Channel send failed " + channel.id().asShortText());
                         fatalError(channelFuture.cause());
+                    }
+                    else {
+                        log.info("Write and Flush succeeded for on channel " + channel.id().asShortText());
                     }
                 }
                 catch (Throwable t) {
+                    //TODO : AGP
+                    log.info("Channel send failed " + channel.id().asShortText());
+                    log.error("Error in isSuccess check ");
+                    log.error(t);
                     fatalError(t);
                 }
             });
@@ -158,8 +199,8 @@ class InvocationResponseFuture
         if (connectionFuture != null) {
             connectionFuture.cancel(wasInterrupted);
         }
-        if (invocationFuture != null) {
-            invocationFuture.cancel(wasInterrupted);
+        if (thriftRequest != null) {
+            thriftRequest.cancel(wasInterrupted);
         }
     }
 
@@ -173,5 +214,10 @@ class InvocationResponseFuture
             throwable = new TException(throwable);
         }
         setException(throwable);
+    }
+
+    public void dummy202003160100()
+    {
+        log.info("Dummy method for sanity");
     }
 }

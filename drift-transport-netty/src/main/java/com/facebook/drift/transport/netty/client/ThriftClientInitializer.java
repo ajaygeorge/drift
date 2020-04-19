@@ -61,6 +61,7 @@ class ThriftClientInitializer
     {
         ChannelPipeline pipeline = channel.pipeline();
 
+        //pipeline.addFirst(new FlushConsolidationHandler(4));
         socksProxyAddress.ifPresent(socks -> pipeline.addLast(new Socks4ProxyHandler(new InetSocketAddress(socks.getHost(), socks.getPort()))));
 
         sslContextSupplier.ifPresent(sslContext -> pipeline.addLast(sslContext.get().newHandler(channel.alloc())));
@@ -68,5 +69,6 @@ class ThriftClientInitializer
         transport.addFrameHandlers(pipeline, Optional.of(protocol), maxFrameSize, true);
 
         pipeline.addLast(new ThriftClientHandler(requestTimeout, transport, protocol));
+        //pipeline.addLast(new LoggingHandler(LogLevel.DEBUG));
     }
 }

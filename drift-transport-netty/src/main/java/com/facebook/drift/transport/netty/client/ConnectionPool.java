@@ -15,7 +15,9 @@
  */
 package com.facebook.drift.transport.netty.client;
 
+import com.facebook.airlift.log.Logger;
 import com.facebook.drift.protocol.TTransportException;
+import com.facebook.drift.transport.netty.throttle.ThrottleLock;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.net.HostAndPort;
@@ -32,6 +34,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static com.facebook.airlift.concurrent.Threads.daemonThreadsNamed;
+import static com.facebook.drift.transport.netty.client.ConnectionFactory.THROTTLE_LOCK_KEY;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -39,6 +42,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 class ConnectionPool
         implements ConnectionManager
 {
+    private static final Logger logger = Logger.get(ConnectionPool.class);
     private final ConnectionManager connectionFactory;
     private final EventLoopGroup group;
 
@@ -85,11 +89,15 @@ class ConnectionPool
 
                 // connection is still opening
                 if (!future.isDone()) {
+                    logger.info("Channel Future is not done");
                     return future;
                 }
 
                 // check if connection is failed or closed
                 Channel channel = future.getNow();
+                if (channel != null) {
+                    logger.info("Channel : " + channel.id().asShortText() + " isOpen : " + channel.isOpen());
+                }
                 // channel can be null if the future was canceled
                 if (channel != null && channel.isOpen()) {
                     return future;
@@ -108,6 +116,7 @@ class ConnectionPool
         // remove connection from cache when it is closed
         future.addListener(channelFuture -> {
             if (future.isSuccess()) {
+                future.getNow().attr(THROTTLE_LOCK_KEY).set(new ThrottleLock());
                 future.getNow().closeFuture().addListener(closeFuture -> cachedConnections.asMap().remove(key, future));
             }
         });
@@ -118,6 +127,12 @@ class ConnectionPool
     @Override
     public void returnConnection(Channel connection)
     {
+    }
+
+    @Override
+    public void closeConnection(Channel connection)
+    {
+        connection.close();
     }
 
     @Override

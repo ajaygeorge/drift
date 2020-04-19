@@ -15,6 +15,7 @@
  */
 package com.facebook.drift.transport.netty.client;
 
+import com.facebook.airlift.log.Logger;
 import com.facebook.drift.TApplicationException;
 import com.facebook.drift.TException;
 import com.facebook.drift.codec.ThriftCodec;
@@ -37,11 +38,13 @@ import com.facebook.drift.transport.netty.codec.ThriftFrame;
 import com.facebook.drift.transport.netty.codec.Transport;
 import com.facebook.drift.transport.netty.ssl.TChannelBufferInputTransport;
 import com.facebook.drift.transport.netty.ssl.TChannelBufferOutputTransport;
+import com.facebook.drift.transport.netty.throttle.ThrottleLock;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.AbstractFuture;
 import io.airlift.units.Duration;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
@@ -67,6 +70,7 @@ import static com.facebook.drift.protocol.TMessageType.CALL;
 import static com.facebook.drift.protocol.TMessageType.EXCEPTION;
 import static com.facebook.drift.protocol.TMessageType.ONEWAY;
 import static com.facebook.drift.protocol.TMessageType.REPLY;
+import static com.facebook.drift.transport.netty.client.ConnectionFactory.THROTTLE_LOCK_KEY;
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -77,6 +81,7 @@ public class ThriftClientHandler
         extends ChannelDuplexHandler
 {
     private static final int ONEWAY_SEQUENCE_ID = 0xFFFF_FFFF;
+    private static final Logger log = Logger.get(ThriftClientHandler.class);
 
     private final Duration requestTimeout;
     private final Transport transport;
@@ -84,7 +89,7 @@ public class ThriftClientHandler
 
     private final ConcurrentHashMap<Integer, RequestHandler> pendingRequests = new ConcurrentHashMap<>();
     private final AtomicReference<TException> channelError = new AtomicReference<>();
-    private final AtomicInteger sequenceId = new AtomicInteger(42);
+    private static final AtomicInteger sequenceId = new AtomicInteger(42);
 
     ThriftClientHandler(Duration requestTimeout, Transport transport, Protocol protocol)
     {
@@ -99,6 +104,8 @@ public class ThriftClientHandler
     {
         if (message instanceof ThriftRequest) {
             ThriftRequest thriftRequest = (ThriftRequest) message;
+            //TODO : AGP
+            log.info("write: Sending Thrift request : " + thriftRequest.getMethod().toString() + " with params " + thriftRequest.getParameters());
             sendMessage(ctx, thriftRequest, promise);
         }
         else {
@@ -131,6 +138,7 @@ public class ThriftClientHandler
         // if this connection is failed, immediately fail the request
         TException channelError = this.channelError.get();
         if (channelError != null) {
+            log.error(channelError, "Error in Thrift channelError. Setting exception on thrift Future");
             thriftRequest.failed(channelError);
             requestBuffer.release();
             return;
@@ -146,6 +154,10 @@ public class ThriftClientHandler
                     protocol,
                     true);
 
+            log.info("Sending Thrift request : " + thriftFrame.getSequenceId()
+                    + " pending=" + pendingRequests.size() + " pendingRequests=" + pendingRequests.keySet()
+                    + " on channel " + context.channel().id().asShortText());
+            log.info("channel " + context.channel().id().asShortText() + " is writable : " + context.channel().isWritable());
             ChannelFuture sendFuture = context.write(thriftFrame, promise);
             sendFuture.addListener(future -> messageSent(context, sendFuture, requestHandler));
         }
@@ -159,10 +171,12 @@ public class ThriftClientHandler
     {
         try {
             if (!future.isSuccess()) {
+                log.error("Sending Thrift request failed " + requestHandler.getSequenceId() + " on channel " + context.channel().id().asShortText());
                 onError(context, new TTransportException("Sending request failed", future.cause()), Optional.of(requestHandler));
                 return;
             }
 
+            log.info("Sent Thrift request : " + requestHandler.getSequenceId() + " pending=" + pendingRequests.size() + " on channel " + context.channel().id().asShortText());
             requestHandler.onRequestSent();
         }
         catch (Throwable t) {
@@ -189,6 +203,7 @@ public class ThriftClientHandler
                 throw new TTransportException("Unknown sequence id in response: " + thriftFrame.getSequenceId());
             }
 
+            log.info("Received Thrift request : " + thriftFrame.getSequenceId() + " response, pending=" + pendingRequests.size() + " on channel " + context.channel().id().asShortText());
             requestHandler.onResponseReceived(thriftFrame.retain());
         }
         catch (Throwable t) {
@@ -208,7 +223,24 @@ public class ThriftClientHandler
     @Override
     public void channelInactive(ChannelHandlerContext context)
     {
+        log.info("channelInactive : Closing channel " + context.channel().id().asShortText());
         onError(context, new TTransportException("Client was disconnected by server"), Optional.empty());
+    }
+
+    @Override
+    public void channelWritabilityChanged(ChannelHandlerContext ctx)
+            throws Exception
+    {
+        Channel channel = ctx.channel();
+        log.info("channelWritabilityChanged : Channel " + channel.id().asShortText() + " isWritable : " + channel.isWritable());
+        ThrottleLock throttleLock = channel.attr(THROTTLE_LOCK_KEY).get();
+        if (channel.isWritable()) {
+            synchronized (throttleLock) {
+                log.info("channelWritabilityChanged : Unlocking Channel " + channel.id().asShortText());
+                throttleLock.notifyAll();
+            }
+        }
+        ctx.fireChannelWritabilityChanged();
     }
 
     private void onError(ChannelHandlerContext context, Throwable throwable, Optional<RequestHandler> currentRequest)
@@ -216,6 +248,13 @@ public class ThriftClientHandler
         if (throwable instanceof FrameTooLargeException) {
             checkArgument(!currentRequest.isPresent(), "current request should not be set for FrameTooLargeException");
             onFrameTooLargeException(context, (FrameTooLargeException) throwable);
+            return;
+        }
+        if (throwable instanceof DriftApplicationException) {
+            currentRequest.ifPresent(request -> {
+                log.info("Just removing the seq ID " + request.getSequenceId() + " from the pending requests ");
+                pendingRequests.remove(request.getSequenceId());
+            });
             return;
         }
 
@@ -348,6 +387,7 @@ public class ThriftClientHandler
         ByteBuf encodeRequest(ByteBufAllocator allocator)
                 throws Exception
         {
+            log.info("encodeRequest");
             TChannelBufferOutputTransport transport = new TChannelBufferOutputTransport(allocator);
             try {
                 TProtocolWriter protocolWriter = protocol.createProtocol(transport);
@@ -384,11 +424,13 @@ public class ThriftClientHandler
 
         void onRequestSent()
         {
+            log.info("onRequestSent");
             if (!thriftRequest.isOneway()) {
                 return;
             }
 
             if (!finished.compareAndSet(false, true)) {
+                log.info("Returning now since finished : onRequestSent");
                 return;
             }
 
@@ -403,16 +445,20 @@ public class ThriftClientHandler
 
         void onResponseReceived(ThriftFrame thriftFrame)
         {
+            log.info("onResponseReceived");
             try {
                 if (!finished.compareAndSet(false, true)) {
+                    log.info("Returning now since finished : onResponseReceived");
                     return;
                 }
 
                 cancelRequestTimeout();
                 Object response = decodeResponse(thriftFrame.getMessage());
+                log.info("Setting response on the thrift Request");
                 thriftRequest.setResponse(response);
             }
             catch (Throwable throwable) {
+                log.error(throwable, "Error in Thrift onResponseReceived. Setting exception on thrift Future");
                 thriftRequest.failed(throwable);
             }
             finally {
@@ -423,6 +469,7 @@ public class ThriftClientHandler
         Object decodeResponse(ByteBuf responseMessage)
                 throws Exception
         {
+            log.info("decodeResponse");
             TChannelBufferInputTransport transport = new TChannelBufferInputTransport(responseMessage);
             try {
                 TProtocolReader protocolReader = protocol.createProtocol(transport);
@@ -430,6 +477,7 @@ public class ThriftClientHandler
 
                 // validate response header
                 TMessage message = protocolReader.readMessageBegin();
+                log.info("Received Message " + message.getName() + " of type " + message.getType() + " for Seq id : " + message.getSequenceId());
                 if (message.getType() == EXCEPTION) {
                     TApplicationException exception = ExceptionReader.readTApplicationException(protocolReader);
                     protocolReader.readMessageEnd();
@@ -469,6 +517,7 @@ public class ThriftClientHandler
                 protocolReader.readMessageEnd();
 
                 if (exception != null) {
+                    log.info("Throwing DriftApplicationException");
                     throw new DriftApplicationException(exception);
                 }
 
@@ -488,7 +537,9 @@ public class ThriftClientHandler
 
         void onChannelError(Throwable requestException)
         {
+            log.info("onChannelError");
             if (!finished.compareAndSet(false, true)) {
+                log.info("Returning now since finished : onChannelError");
                 return;
             }
 
@@ -496,6 +547,7 @@ public class ThriftClientHandler
                 cancelRequestTimeout();
             }
             finally {
+                log.error(requestException, "Error in Thrift onChannelError. Setting exception on thrift Future");
                 thriftRequest.failed(requestException);
             }
         }

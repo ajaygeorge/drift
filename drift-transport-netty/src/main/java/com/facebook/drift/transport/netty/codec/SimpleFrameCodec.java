@@ -15,6 +15,7 @@
  */
 package com.facebook.drift.transport.netty.codec;
 
+import com.facebook.airlift.log.Logger;
 import com.facebook.drift.protocol.TMessage;
 import com.facebook.drift.protocol.TTransportException;
 import com.facebook.drift.transport.netty.ssl.TChannelBufferInputTransport;
@@ -30,6 +31,7 @@ import static java.util.Objects.requireNonNull;
 public class SimpleFrameCodec
         extends ChannelDuplexHandler
 {
+    private static final Logger log = Logger.get(SimpleFrameCodec.class);
     private final Transport transport;
     private final Protocol protocol;
     private final boolean assumeClientsSupportOutOfOrderResponses;
@@ -86,6 +88,7 @@ public class SimpleFrameCodec
             ThriftFrame thriftFrame = (ThriftFrame) message;
             try {
                 // Note: simple transports do not support headers. This is acceptable since headers should be inconsequential to the request
+                log.info("Writing Thrift Message " + thriftFrame.getSequenceId() + " on channel " + context.channel().id().asShortText());
                 message = thriftFrame.getMessage();
             }
             finally {

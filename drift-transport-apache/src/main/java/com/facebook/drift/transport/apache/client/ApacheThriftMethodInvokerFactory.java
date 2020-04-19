@@ -38,6 +38,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.util.Arrays;
 import java.util.Optional;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -79,10 +80,11 @@ public class ApacheThriftMethodInvokerFactory<I>
     {
         requireNonNull(factoryConfig, "factoryConfig is null");
 
-        ThreadFactory threadFactory = daemonThreadsNamed("drift-client-%s");
+        ThreadFactory threadFactory = daemonThreadsNamed("thrift-drift-client-%s");
+        System.out.println("thrift-drift thread pool created " + Arrays.toString(Thread.currentThread().getStackTrace()));
         if (factoryConfig.getThreadCount() == null) {
             executorService = listeningDecorator(newCachedThreadPool(threadFactory));
-            delayService = listeningDecorator(newSingleThreadScheduledExecutor(daemonThreadsNamed("drift-client-delay-%s")));
+            delayService = listeningDecorator(newSingleThreadScheduledExecutor(daemonThreadsNamed("thrift-drift-client-delay-%s")));
         }
         else {
             delayService = listeningDecorator(newScheduledThreadPool(factoryConfig.getThreadCount(), threadFactory));

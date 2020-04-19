@@ -435,6 +435,11 @@ public class TestDriftNettyMethodInvoker
         }
 
         @Override
+        public void closeConnection(Channel connection)
+        {
+        }
+
+        @Override
         public void close() {}
     }
 

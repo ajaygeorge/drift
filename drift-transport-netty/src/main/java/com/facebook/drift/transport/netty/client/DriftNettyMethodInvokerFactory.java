@@ -24,6 +24,8 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.net.HostAndPort;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.epoll.Epoll;
+import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 
 import javax.annotation.PreDestroy;
@@ -75,8 +77,12 @@ public class DriftNettyMethodInvokerFactory<I>
     {
         requireNonNull(factoryConfig, "factoryConfig is null");
 
-        group = new NioEventLoopGroup(factoryConfig.getThreadCount(), daemonThreadsNamed("drift-client-%s"));
-
+        if (Epoll.isAvailable()) {
+            group = new EpollEventLoopGroup(factoryConfig.getThreadCount(), daemonThreadsNamed("drift-client-%s"));
+        }
+        else {
+            group = new NioEventLoopGroup(factoryConfig.getThreadCount(), daemonThreadsNamed("drift-client-%s"));
+        }
         this.clientConfigurationProvider = requireNonNull(clientConfigurationProvider, "clientConfigurationProvider is null");
         this.sslContextFactory = createSslContextFactory(true, factoryConfig.getSslContextRefreshTime(), group);
         this.defaultSocksProxy = Optional.ofNullable(factoryConfig.getSocksProxy());

@@ -37,6 +37,8 @@ interface ConnectionManager
 
     void returnConnection(Channel connection);
 
+    void closeConnection(Channel connection);
+
     @Override
     void close();
 

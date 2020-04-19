@@ -147,6 +147,7 @@ class DriftMethodInvocation<A extends Address>
         try {
             // request was already canceled
             if (isCancelled()) {
+                log.info("Request was cancelled. Returning");
                 return;
             }
 
@@ -172,7 +173,7 @@ class DriftMethodInvocation<A extends Address>
             }
 
             Duration connectDelay = retryPolicy.getBackoffDelay(connectionFailuresCount);
-            log.debug("Failed connection to %s with attempt %s, will retry in %s", address.get(), connectionFailuresCount, connectDelay);
+            log.info("Failed connection to %s with attempt %s, will retry in %s", address.get(), connectionFailuresCount, connectDelay);
             schedule(connectDelay, () -> invoke(address.get()));
         }
         catch (Throwable t) {
@@ -184,24 +185,30 @@ class DriftMethodInvocation<A extends Address>
     private synchronized void invoke(A address)
     {
         try {
+            log.info("Start invoke");
             long invocationStartTime = ticker.read();
-            ListenableFuture<Object> result = invoker.invoke(new InvokeRequest(metadata, address, headers, parameters));
+            InvokeRequest request = new InvokeRequest(metadata, address, headers, parameters);
+            ListenableFuture<Object> result = invoker.invoke(request);
             stat.recordResult(invocationStartTime, result);
             currentTask = result;
 
             Futures.addCallback(result, new FutureCallback<Object>()
                     {
                         @Override
-                        public void onSuccess(Object result)
+                        public void onSuccess(Object resultOfInvocation)
                         {
+                            //TODO: AGP
+                            log.info("Received response from Drift " + request.toString() + "\n " + request.getParameters());
                             resetConnectionFailures(address);
-                            set(result);
+                            set(resultOfInvocation);
                         }
 
                         @Override
-                        public void onFailure(Throwable t)
+                        public void onFailure(Throwable throwable)
                         {
-                            handleFailure(address, t);
+                            //TODO: AGP
+                            log.error(throwable, "Error response from Drift " + request.toString() + " \n" + request.getParameters());
+                            handleFailure(address, throwable);
                         }
                     },
                     directExecutor());
@@ -225,6 +232,7 @@ class DriftMethodInvocation<A extends Address>
             }
 
             ExceptionClassification exceptionClassification = retryPolicy.classifyException(throwable, metadata.isIdempotent());
+            log.info("handleFailure : Exception Classification is " + exceptionClassification.toString());
 
             // update stats based on classification
             attemptedAddresses.add(address);
@@ -243,6 +251,7 @@ class DriftMethodInvocation<A extends Address>
 
             // should retry?
             Duration duration = succinctNanos(ticker.read() - startTime);
+            log.info("handleFailure : Duration is " + duration.toString());
             if (!exceptionClassification.isRetry().orElse(FALSE)) {
                 // always store exception if non-retryable, so it is added to the exception chain
                 lastException = throwable;
@@ -268,7 +277,7 @@ class DriftMethodInvocation<A extends Address>
 
             // backoff before next invocation
             Duration backoffDelay = retryPolicy.getBackoffDelay(invocationAttempts);
-            log.debug("Failed invocation of %s with attempt %s, will retry in %s (overloadedRejects: %s). Exception: %s",
+            log.info("Failed invocation of %s with attempt %s, will retry in %s (overloadedRejects: %s). Exception: %s",
                     metadata.getName(),
                     invocationAttempts,
                     backoffDelay,
@@ -292,6 +301,7 @@ class DriftMethodInvocation<A extends Address>
                         @Override
                         public void onSuccess(Object result)
                         {
+                            log.info("Running retry task");
                             task.run();
                         }
 

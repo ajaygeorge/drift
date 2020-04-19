@@ -23,6 +23,9 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.epoll.Epoll;
+import io.netty.channel.epoll.EpollEventLoopGroup;
+import io.netty.channel.epoll.EpollServerSocketChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.ssl.SslContext;
@@ -65,10 +68,14 @@ public class DriftNettyServerTransport
         requireNonNull(methodInvoker, "methodInvoker is null");
         requireNonNull(config, "config is null");
         this.port = config.getPort();
-
-        ioGroup = new NioEventLoopGroup(config.getIoThreadCount(), threadsNamed("drift-server-io-%s"));
-
-        workerGroup = new NioEventLoopGroup(config.getWorkerThreadCount(), threadsNamed("drift-server-worker-%s"));
+        if (Epoll.isAvailable()) {
+            ioGroup = new EpollEventLoopGroup(config.getIoThreadCount(), threadsNamed("drift-server-io-%s"));
+            workerGroup = new EpollEventLoopGroup(config.getWorkerThreadCount(), threadsNamed("drift-server-worker-%s"));
+        }
+        else {
+            ioGroup = new NioEventLoopGroup(config.getIoThreadCount(), threadsNamed("drift-server-io-%s"));
+            workerGroup = new NioEventLoopGroup(config.getWorkerThreadCount(), threadsNamed("drift-server-worker-%s"));
+        }
 
         Optional<Supplier<SslContext>> sslContext = Optional.empty();
         if (config.isSslEnabled()) {
@@ -95,9 +102,13 @@ public class DriftNettyServerTransport
                 config.isAssumeClientsSupportOutOfOrderResponses(),
                 workerGroup);
 
+        Class klazz = NioServerSocketChannel.class;
+        if (Epoll.isAvailable()) {
+            klazz = EpollServerSocketChannel.class;
+        }
         bootstrap = new ServerBootstrap()
                 .group(ioGroup, workerGroup)
-                .channel(NioServerSocketChannel.class)
+                .channel(klazz)
                 .childHandler(serverInitializer)
                 .option(SO_BACKLOG, config.getAcceptBacklog())
                 .option(ALLOCATOR, allocator)

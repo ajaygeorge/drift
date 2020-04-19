@@ -26,6 +26,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import io.airlift.units.Duration;
 
+import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
@@ -78,14 +79,32 @@ class DriftNettyMethodInvoker
                     InvocationResponseFuture.createInvocationResponseFuture(request, connectionParameters, connectionManager),
                     () -> {
                         // log before throwing as this is likely a bug in Drift or Netty
-                        String message = "Invocation response future did not complete after " + invokeTimeout;
+                        //TODO : AGP
+                        List<Object> parameters = request.getParameters();
+                        String message = "Invocation response future did not complete after " + invokeTimeout + " for requestId: " + parameters;
                         log.error(message);
+
+                        /*
+                        if (System.currentTimeMillis() % 9 == 0) {
+                            ThreadMXBean threadMXBean = ManagementFactory.getThreadMXBean();
+                            ThreadInfo[] threadInfos = threadMXBean.dumpAllThreads(true, true);
+                            Path path = Files.createTempFile(LocalDateTime.now() + "_thread_dump_", ".txt");
+                            log.info("THREAD DUMP ON TIMEOUT");
+                            log.info("Writing to " + System.getProperty("java.io.tmpdir") + " " + path.getFileName());
+                            List<String> collect = Arrays.stream(threadInfos)
+                                    .map(t -> t.toString())
+                                    .collect(Collectors.toList());
+                            Files.write(path, collect, StandardOpenOption.APPEND);
+                        }
+                         */
                         throw new RequestTimeoutException(message);
                     },
                     invokeTimeout,
                     delayService);
         }
         catch (Exception e) {
+            log.error("Failure in adding timeout");
+            log.error(e);
             return immediateFailedFuture(e);
         }
     }

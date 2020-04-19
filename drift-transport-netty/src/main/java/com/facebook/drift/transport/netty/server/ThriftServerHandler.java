@@ -162,12 +162,18 @@ public class ThriftServerHandler
                         @Override
                         public void onSuccess(ThriftFrame result)
                         {
+                            //TODO: AGP
+                            if (result != null) {
+                                log.info("Message received in Server " + result.getSequenceId());
+                            }
                             context.writeAndFlush(result);
                         }
 
                         @Override
                         public void onFailure(Throwable t)
                         {
+                            log.error("Message failure in Server ");
+                            log.error(t);
                             context.disconnect();
                         }
                     },
